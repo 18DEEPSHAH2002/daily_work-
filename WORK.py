@@ -2,14 +2,16 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import re
+import requests
 from io import StringIO
+import urllib.parse
 
 # Use caching to prevent re-running the data download and processing on every interaction
 @st.cache_data(ttl=600) # Cache data for 10 minutes
 def load_and_process_data(sheet_url):
     """
     Loads data from the specified Google Sheet URL, processes each tab,
-    and returns the analyzed data.
+    and returns the analyzed data with enhanced error handling.
     """
     try:
         match = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
@@ -32,17 +34,31 @@ def load_and_process_data(sheet_url):
         
         for i, sheet_name in enumerate(sheet_names):
             try:
-                csv_export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tqx=out:csv&sheet={sheet_name.replace(" ", "%20")}'
-                df = pd.read_csv(csv_export_url)
+                # More robust URL encoding for sheet names with special characters
+                encoded_sheet_name = urllib.parse.quote_plus(sheet_name)
+                csv_export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={encoded_sheet_name}'
                 
+                # Use requests to fetch the data with a timeout
+                response = requests.get(csv_export_url, timeout=10)
+                
+                # Raise an exception for bad status codes (like 403 Forbidden or 404 Not Found)
+                response.raise_for_status()
+                
+                # If successful, read the content into pandas
+                df = pd.read_csv(StringIO(response.text))
                 total, statuses, processed_df = analyze_task_data(df)
 
                 if processed_df is not None and total > 0:
                     department_data[sheet_name] = {'Total Tasks': total, **statuses}
                     department_dfs[sheet_name] = processed_df
             
+            # *** NEW: SPECIFIC ERROR HANDLING ***
+            except requests.exceptions.HTTPError as e:
+                st.error(f"Failed to access '{sheet_name}': {e}. This strongly indicates a permissions issue. Please ensure the Google Sheet's sharing is set to 'Anyone with the link can view'.")
+            except requests.exceptions.RequestException as e:
+                st.error(f"A network error occurred for '{sheet_name}': {e}. This could be a firewall or connectivity issue.")
             except Exception as e:
-                st.warning(f"Could not read or process sheet: '{sheet_name}'. Skipping.")
+                st.warning(f"Could not process sheet '{sheet_name}' after download. It might be empty or formatted incorrectly. Error: {e}")
 
             progress_bar.progress((i + 1) / len(sheet_names), text=f"Loading: {sheet_name}")
 
@@ -50,7 +66,7 @@ def load_and_process_data(sheet_url):
         return department_data, department_dfs
 
     except Exception as e:
-        st.error(f"Major failure loading from Google Sheet. Error: {e}")
+        st.error(f"A major failure occurred during the data loading process. Error: {e}")
         return None, None
 
 
@@ -82,14 +98,11 @@ def analyze_task_data(df):
             for status in df[achievement_col]:
                 status_str = str(status).lower().strip()
                 
-                # *** UPDATED LOGIC HERE ***
-                # Only count as "Completed" if the text is exactly "complete".
                 if status_str == 'complete':
                     statuses['Completed'] += 1
                     continue
                 
                 try:
-                    # Extract numeric value from strings like '90%' or '90' or '91-100%'
                     numeric_val = float(re.findall(r"[-+]?\d*\.\d+|\d+", status_str)[0])
                     if numeric_val > 90:
                         statuses['Almost Complete'] += 1
@@ -98,7 +111,6 @@ def analyze_task_data(df):
                     else:
                         statuses['Work in Progress'] += 1
                 except (ValueError, IndexError):
-                    # If conversion fails or no number is found, categorize as in progress
                     if status_str not in ['nan', '']:
                          statuses['Work in Progress'] += 1
 
@@ -118,39 +130,23 @@ def show_home_page(department_data):
     results_df = pd.DataFrame.from_dict(department_data, orient='index')
     results_df = results_df.sort_values(by='Total Tasks', ascending=False)
     
-    # Define colors for the statuses
     status_colors = {
-        'Completed': '#2ca02c', # Green
-        'Almost Complete': '#98df8a', # Light Green
-        'Half Done': '#ff7f0e', # Orange
-        'Work in Progress': '#d62728' # Red
+        'Completed': '#2ca02c', 'Almost Complete': '#98df8a',
+        'Half Done': '#ff7f0e', 'Work in Progress': '#d62728'
     }
 
     fig = go.Figure()
-
-    # Create a stacked bar chart
     for status in status_colors.keys():
         if status in results_df.columns:
-            fig.add_trace(go.Bar(
-                x=results_df.index,
-                y=results_df[status],
-                name=status,
-                marker_color=status_colors[status],
-                text=results_df[status],
-                textposition='auto'
-            ))
+            fig.add_trace(go.Bar(x=results_df.index, y=results_df[status], name=status,
+                                marker_color=status_colors[status], text=results_df[status],
+                                textposition='auto'))
 
-    fig.update_layout(
-        barmode='stack',  # Change to stacked bar chart
-        title='<b>Task Completion Status by Department</b>',
-        xaxis_title='Department',
-        yaxis_title='Number of Tasks',
-        legend_title='Status',
-        font=dict(family="Arial, sans-serif", size=12),
-        plot_bgcolor='rgba(0,0,0,0)',
-        yaxis=dict(gridcolor='lightgrey'),
-        xaxis={'categoryorder':'total descending'}
-    )
+    fig.update_layout(barmode='stack', title='<b>Task Completion Status by Department</b>',
+                      xaxis_title='Department', yaxis_title='Number of Tasks',
+                      legend_title='Status', font=dict(family="Arial, sans-serif", size=12),
+                      plot_bgcolor='rgba(0,0,0,0)', yaxis=dict(gridcolor='lightgrey'),
+                      xaxis={'categoryorder':'total descending'})
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Summary Data")
@@ -162,7 +158,6 @@ def show_department_page(department_name, department_info, df):
     """
     st.header(f"🔍 Analysis for: {department_name}")
 
-    # Display new metrics
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Total Tasks", department_info.get('Total Tasks', 0))
     col2.metric("Completed", department_info.get('Completed', 0))
@@ -194,7 +189,7 @@ def main():
         elif selected_page in department_data:
             show_department_page(selected_page, department_data[selected_page], department_dfs[selected_page])
     else:
-        st.warning("No valid data could be extracted from the Google Sheet.")
+        st.warning("No valid data could be extracted from the Google Sheet. Please check the error messages above for details.")
 
 if __name__ == "__main__":
     main()
