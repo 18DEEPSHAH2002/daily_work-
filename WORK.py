@@ -1,24 +1,21 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import re
 from io import StringIO
 
-def process_file(uploaded_file):
+def analyze_task_data(df):
     """
-    Processes a single uploaded CSV file to count tasks and return the DataFrame.
+    Analyzes a DataFrame to count total and completed tasks.
 
     Args:
-        uploaded_file: The file-like object from Streamlit's file_uploader.
+        df: A pandas DataFrame containing the task data from a sheet.
 
     Returns:
         A tuple containing (total_tasks, completed_tasks, DataFrame).
-        Returns (0, 0, None) if the file cannot be processed.
+        Returns (0, 0, None) if the DataFrame is empty or cannot be processed.
     """
     try:
-        # Read the content of the file into a DataFrame
-        string_data = StringIO(uploaded_file.getvalue().decode('utf-8'))
-        df = pd.read_csv(string_data)
-
         # --- Data Cleaning: Remove rows where all values are NaN ---
         df.dropna(how='all', inplace=True)
         if df.empty:
@@ -54,7 +51,7 @@ def process_file(uploaded_file):
         return total_tasks, completed_tasks, df
 
     except Exception as e:
-        st.warning(f"Could not process file: {uploaded_file.name}. Error: {e}")
+        st.warning(f"Could not process a DataFrame. Error: {e}")
         return 0, 0, None
 
 def show_home_page(department_data):
@@ -62,49 +59,27 @@ def show_home_page(department_data):
     Displays the main dashboard with an aggregated view of all departments.
     """
     st.header("📈 Overall Task Analysis")
-    st.markdown("This dashboard provides a summary of task completion across all departments.")
+    st.markdown("This dashboard provides a summary of task completion across all departments, pulled directly from the Google Sheet.")
 
-    # Convert the analysis data into a DataFrame for visualization
     results_df = pd.DataFrame.from_dict(department_data, orient='index')
     results_df = results_df.sort_values(by='Total Tasks', ascending=False)
 
-    # --- Create the Bar Chart using Plotly ---
     fig = go.Figure()
-
-    # Bar for Total Tasks
     fig.add_trace(go.Bar(
-        x=results_df.index,
-        y=results_df['Total Tasks'],
-        name='Total Tasks',
-        marker_color='#636EFA',
-        text=results_df['Total Tasks'],
-        textposition='auto'
+        x=results_df.index, y=results_df['Total Tasks'], name='Total Tasks',
+        marker_color='#636EFA', text=results_df['Total Tasks'], textposition='auto'
     ))
-
-    # Bar for Completed Tasks
     fig.add_trace(go.Bar(
-        x=results_df.index,
-        y=results_df['Completed Tasks'],
-        name='Completed Tasks',
-        marker_color='#00CC96',
-        text=results_df['Completed Tasks'],
-        textposition='auto'
+        x=results_df.index, y=results_df['Completed Tasks'], name='Completed Tasks',
+        marker_color='#00CC96', text=results_df['Completed Tasks'], textposition='auto'
     ))
-
-    # Customize chart layout for better readability
     fig.update_layout(
-        barmode='group',
-        title='<b>Task Completion Status by Department</b>',
-        xaxis_title='Department',
-        yaxis_title='Number of Tasks',
-        legend_title='Status',
-        font=dict(family="Arial, sans-serif", size=12),
-        plot_bgcolor='rgba(0,0,0,0)',
-        yaxis=dict(gridcolor='lightgrey'),
+        barmode='group', title='<b>Task Completion Status by Department</b>',
+        xaxis_title='Department', yaxis_title='Number of Tasks',
+        legend_title='Status', font=dict(family="Arial, sans-serif", size=12),
+        plot_bgcolor='rgba(0,0,0,0)', yaxis=dict(gridcolor='lightgrey'),
         xaxis={'categoryorder':'total descending'}
     )
-
-    # Display the chart and the summary data table
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Summary Data")
@@ -121,74 +96,106 @@ def show_department_page(department_name, department_info, df):
     pending_tasks = total_tasks - completed_tasks
     completion_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
 
-    # --- Display Key Metrics ---
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Tasks", f"{total_tasks}")
     col2.metric("Completed Tasks", f"{completed_tasks}")
     col3.metric("Pending Tasks", f"{pending_tasks}")
     col4.metric("Completion Rate", f"{completion_rate:.2f}%")
 
-    # --- Display Raw Data Table ---
     st.subheader("Task Details")
-    st.markdown("Here is the full list of tasks from the uploaded file for this department.")
     st.dataframe(df, use_container_width=True)
-
 
 def main():
     """
     Main function to run the Streamlit application.
     """
     st.set_page_config(page_title="Department Task Analysis", layout="wide")
+    st.title("📊 Department Weekly Task Analysis from Google Sheets")
 
-    st.title("📊 Department Weekly Task Analysis")
-    st.markdown("""
-    Upload your department's weekly CSV files to analyze task progress.
-    The **Home** page shows an overview of all departments, and you can select a specific department from the sidebar to see its detailed task list.
-    """)
-
-    # --- File Uploader ---
-    uploaded_files = st.file_uploader(
-        "Upload Department CSV Files",
-        type=['csv'],
-        accept_multiple_files=True,
-        help="You can drag and drop multiple files here."
+    # --- Get Google Sheet URL from user ---
+    sheet_url = st.text_input(
+        "Enter your Google Sheet URL",
+        "https://docs.google.com/spreadsheets/d/11ziSlsf3oDqffciCPvkreKg4Wz2VuY_sc4g-yTGnmMY/edit?usp=sharing",
+        help="Make sure the sheet is public ('Anyone with the link can view')."
     )
 
-    if uploaded_files:
-        department_data = {}
-        department_dfs = {}
-        excluded_files = ['read me.csv', 'master sheet.csv']
+    if st.button("Analyze Sheet"):
+        if sheet_url:
+            try:
+                # Extract the sheet ID from the URL using regex
+                match = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
+                if not match:
+                    st.error("Invalid Google Sheet URL. Please enter a valid URL.")
+                    return
+                sheet_id = match.group(1)
 
-        # --- Process each uploaded file ---
-        for uploaded_file in uploaded_files:
-            file_name_lower = uploaded_file.name.lower()
-            if any(excluded in file_name_lower for excluded in excluded_files):
-                continue
+                # List of sheet names (tabs) to process.
+                # These should match the tab names in your Google Sheet exactly.
+                sheet_names = [
+                    "ADC G", "ADC RD", "ADC UD", "ADC Khanna", "ADC Jagraon", "DRO",
+                    "SDM RaikotHQ", "CMFO", "AC G", "EAC(UT)", "SDM-Khanna", "SDM-Jagraon",
+                    "SDM-Samrala", "SDM-East", "SDM-West", "AC(UT)", "Political Non Political Works",
+                    "DC Meeting Actionables", "SDM-Political Non Political Wor", "Extra", "Back Sheet"
+                ]
 
-            # Clean up the filename to use as the department name
-            clean_name = uploaded_file.name.replace("Saturday Review- DC Ludhiana.xlsx - ", "").replace(".csv", "")
-            
-            total, completed, df = process_file(uploaded_file)
-            if df is not None and total > 0:
-                department_data[clean_name] = {'Total Tasks': total, 'Completed Tasks': completed}
-                department_dfs[clean_name] = df
+                department_data = {}
+                department_dfs = {}
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                for i, sheet_name in enumerate(sheet_names):
+                    status_text.text(f"Fetching data for: {sheet_name}...")
+                    try:
+                        # Construct the URL to download the sheet as a CSV
+                        csv_export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name.replace(" ", "%20")}'
+                        
+                        # Read data from the URL
+                        df = pd.read_csv(csv_export_url)
+
+                        # Analyze the data from the sheet
+                        total, completed, processed_df = analyze_task_data(df)
+
+                        if processed_df is not None and total > 0:
+                            department_data[sheet_name] = {'Total Tasks': total, 'Completed Tasks': completed}
+                            department_dfs[sheet_name] = processed_df
+                    
+                    except Exception as e:
+                        # This allows the app to continue even if some sheets are missing or fail
+                        st.warning(f"Could not read or process sheet: '{sheet_name}'. It might not exist or be formatted incorrectly. Skipping.")
+
+                    progress_bar.progress((i + 1) / len(sheet_names))
+
+                status_text.success("Data loaded successfully!")
+                progress_bar.empty()
+
+                # Store data in session state to persist across page navigation
+                st.session_state['department_data'] = department_data
+                st.session_state['department_dfs'] = department_dfs
+                st.session_state['app_started'] = True
+
+            except Exception as e:
+                st.error(f"Failed to load data from the Google Sheet. Please ensure the link is correct and the sheet is publicly accessible. Error: {e}")
+        else:
+            st.warning("Please enter a Google Sheet URL.")
+
+    # --- Display content after data is loaded ---
+    if 'app_started' in st.session_state and st.session_state['app_started']:
+        department_data = st.session_state['department_data']
+        department_dfs = st.session_state['department_dfs']
 
         if department_data:
-            # --- Sidebar Navigation ---
             st.sidebar.title("Navigation")
             page_options = ["Home"] + sorted(list(department_data.keys()))
             selected_page = st.sidebar.radio("Go to", page_options)
 
-            # --- Page Routing ---
             if selected_page == "Home":
                 show_home_page(department_data)
             elif selected_page in department_data:
                 show_department_page(selected_page, department_data[selected_page], department_dfs[selected_page])
         else:
-            st.warning("No valid data could be extracted. Please check the files and ensure they are not empty.")
-
-    else:
-        st.info("Upload your CSV files to begin the analysis.")
+            st.warning("No valid data could be extracted. Please check the sheet names and content.")
 
 if __name__ == "__main__":
     main()
+
