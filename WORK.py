@@ -14,7 +14,7 @@ def load_and_process_data(sheet_url):
     try:
         match = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
         if not match:
-            st.error("Invalid Google Sheet URL. Please check the hardcoded URL in the script.")  
+            st.error("Invalid Google Sheet URL. Please check the hardcoded URL in the script.")
             return None, None
         sheet_id = match.group(1)
 
