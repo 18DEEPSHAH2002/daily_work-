@@ -32,7 +32,7 @@ def load_and_process_data(sheet_url):
         
         for i, sheet_name in enumerate(sheet_names):
             try:
-                csv_export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name.replace(" ", "%20")}'
+                csv_export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tqx=out:csv&sheet={sheet_name.replace(" ", "%20")}'
                 df = pd.read_csv(csv_export_url)
                 
                 total, statuses, processed_df = analyze_task_data(df)
@@ -82,12 +82,14 @@ def analyze_task_data(df):
             for status in df[achievement_col]:
                 status_str = str(status).lower().strip()
                 
-                if 'complete' in status_str or '100' in status_str:
+                # *** UPDATED LOGIC HERE ***
+                # Only count as "Completed" if the text is exactly "complete".
+                if status_str == 'complete':
                     statuses['Completed'] += 1
                     continue
                 
                 try:
-                    # Extract numeric value from strings like '90%' or '90'
+                    # Extract numeric value from strings like '90%' or '90' or '91-100%'
                     numeric_val = float(re.findall(r"[-+]?\d*\.\d+|\d+", status_str)[0])
                     if numeric_val > 90:
                         statuses['Almost Complete'] += 1
