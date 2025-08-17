@@ -4,47 +4,80 @@ import plotly.graph_objects as go
 import re
 from io import StringIO
 
+# Use caching to prevent re-running the data download and processing on every interaction
+@st.cache_data(ttl=600) # Cache data for 10 minutes
+def load_and_process_data(sheet_url):
+    """
+    Loads data from the specified Google Sheet URL, processes each tab,
+    and returns the analyzed data.
+    """
+    try:
+        # Extract the sheet ID from the URL using regex
+        match = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
+        if not match:
+            st.error("Invalid Google Sheet URL. Please check the hardcoded URL in the script.")
+            return None, None
+        sheet_id = match.group(1)
+
+        # List of sheet names (tabs) to process.
+        sheet_names = [
+            "ADC G", "ADC RD", "ADC UD", "ADC Khanna", "ADC Jagraon", "DRO",
+            "SDM RaikotHQ", "CMFO", "AC G", "EAC(UT)", "SDM-Khanna", "SDM-Jagraon",
+            "SDM-Samrala", "SDM-East", "SDM-West", "AC(UT)", "Political Non Political Works",
+            "DC Meeting Actionables", "SDM-Political Non Political Wor", "Extra", "Back Sheet"
+        ]
+
+        department_data = {}
+        department_dfs = {}
+        
+        progress_bar = st.progress(0, text="Initializing data load...")
+        
+        for i, sheet_name in enumerate(sheet_names):
+            try:
+                # Construct the URL to download the sheet as a CSV
+                csv_export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name.replace(" ", "%20")}'
+                df = pd.read_csv(csv_export_url)
+
+                # Analyze the data from the sheet
+                total, completed, processed_df = analyze_task_data(df)
+
+                if processed_df is not None and total > 0:
+                    department_data[sheet_name] = {'Total Tasks': total, 'Completed Tasks': completed}
+                    department_dfs[sheet_name] = processed_df
+            
+            except Exception as e:
+                # This allows the app to continue even if some sheets are missing or fail
+                st.warning(f"Could not read or process sheet: '{sheet_name}'. It might not exist or be formatted incorrectly. Skipping.")
+
+            progress_bar.progress((i + 1) / len(sheet_names), text=f"Loading: {sheet_name}")
+
+        progress_bar.empty()
+        return department_data, department_dfs
+
+    except Exception as e:
+        st.error(f"Major failure loading from Google Sheet. Please ensure the link is correct and the sheet is publicly accessible. Error: {e}")
+        return None, None
+
+
 def analyze_task_data(df):
     """
     Analyzes a DataFrame to count total and completed tasks.
-
-    Args:
-        df: A pandas DataFrame containing the task data from a sheet.
-
-    Returns:
-        A tuple containing (total_tasks, completed_tasks, DataFrame).
-        Returns (0, 0, None) if the DataFrame is empty or cannot be processed.
     """
     try:
-        # --- Data Cleaning: Remove rows where all values are NaN ---
         df.dropna(how='all', inplace=True)
         if df.empty:
             return 0, 0, None
 
-        # --- Identify Key Columns ---
-        # Find the column for task descriptions
         task_description_cols = ['Project/Task Name', 'KPI ID', 'Issue']
         primary_task_col = next((col for col in task_description_cols if col in df.columns), None)
 
-        # Find the column for achievement/status
-        achievement_col = None
         possible_status_cols = ['% Achievement', '% Achievement ', 'Achievement', 'Status']
         achievement_col = next((col for col in possible_status_cols if col in df.columns), None)
 
-        # --- Calculate Total and Completed Tasks ---
-        total_tasks = 0
+        total_tasks = len(df) if not primary_task_col else df[primary_task_col].notna().sum()
         completed_tasks = 0
 
-        if primary_task_col:
-            # Count rows with a valid task description
-            total_tasks = df[primary_task_col].notna().sum()
-        else:
-            # Fallback: if no task column, count all non-empty rows
-            total_tasks = len(df)
-
         if achievement_col:
-            # A task is "completed" if the status column contains 'complete' or '100'.
-            # Ensure the column is treated as a string for searching.
             df[achievement_col] = df[achievement_col].astype(str).str.lower()
             completed_tasks = df[achievement_col].str.contains('complete|100', na=False).sum()
 
@@ -112,90 +145,23 @@ def main():
     st.set_page_config(page_title="Department Task Analysis", layout="wide")
     st.title("📊 Department Weekly Task Analysis from Google Sheets")
 
-    # --- Get Google Sheet URL from user ---
-    sheet_url = st.text_input(
-        "Enter your Google Sheet URL",
-        "https://docs.google.com/spreadsheets/d/11ziSlsf3oDqffciCPvkreKg4Wz2VuY_sc4g-yTGnmMY/edit?usp=sharing",
-        help="Make sure the sheet is public ('Anyone with the link can view')."
-    )
-
-    if st.button("Analyze Sheet"):
-        if sheet_url:
-            try:
-                # Extract the sheet ID from the URL using regex
-                match = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
-                if not match:
-                    st.error("Invalid Google Sheet URL. Please enter a valid URL.")
-                    return
-                sheet_id = match.group(1)
-
-                # List of sheet names (tabs) to process.
-                # These should match the tab names in your Google Sheet exactly.
-                sheet_names = [
-                    "ADC G", "ADC RD", "ADC UD", "ADC Khanna", "ADC Jagraon", "DRO",
-                    "SDM RaikotHQ", "CMFO", "AC G", "EAC(UT)", "SDM-Khanna", "SDM-Jagraon",
-                    "SDM-Samrala", "SDM-East", "SDM-West", "AC(UT)", "Political Non Political Works",
-                    "DC Meeting Actionables", "SDM-Political Non Political Wor", "Extra", "Back Sheet"
-                ]
-
-                department_data = {}
-                department_dfs = {}
-                
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-
-                for i, sheet_name in enumerate(sheet_names):
-                    status_text.text(f"Fetching data for: {sheet_name}...")
-                    try:
-                        # Construct the URL to download the sheet as a CSV
-                        csv_export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name.replace(" ", "%20")}'
-                        
-                        # Read data from the URL
-                        df = pd.read_csv(csv_export_url)
-
-                        # Analyze the data from the sheet
-                        total, completed, processed_df = analyze_task_data(df)
-
-                        if processed_df is not None and total > 0:
-                            department_data[sheet_name] = {'Total Tasks': total, 'Completed Tasks': completed}
-                            department_dfs[sheet_name] = processed_df
-                    
-                    except Exception as e:
-                        # This allows the app to continue even if some sheets are missing or fail
-                        st.warning(f"Could not read or process sheet: '{sheet_name}'. It might not exist or be formatted incorrectly. Skipping.")
-
-                    progress_bar.progress((i + 1) / len(sheet_names))
-
-                status_text.success("Data loaded successfully!")
-                progress_bar.empty()
-
-                # Store data in session state to persist across page navigation
-                st.session_state['department_data'] = department_data
-                st.session_state['department_dfs'] = department_dfs
-                st.session_state['app_started'] = True
-
-            except Exception as e:
-                st.error(f"Failed to load data from the Google Sheet. Please ensure the link is correct and the sheet is publicly accessible. Error: {e}")
-        else:
-            st.warning("Please enter a Google Sheet URL.")
+    # The URL is now hardcoded and data loading is triggered automatically
+    sheet_url = "https://docs.google.com/spreadsheets/d/11ziSlsf3oDqffciCPvkreKg4Wz2VuY_sc4g-yTGnmMY/edit?usp=sharing"
+    
+    department_data, department_dfs = load_and_process_data(sheet_url)
 
     # --- Display content after data is loaded ---
-    if 'app_started' in st.session_state and st.session_state['app_started']:
-        department_data = st.session_state['department_data']
-        department_dfs = st.session_state['department_dfs']
+    if department_data and department_dfs:
+        st.sidebar.title("Navigation")
+        page_options = ["Home"] + sorted(list(department_data.keys()))
+        selected_page = st.sidebar.radio("Go to", page_options)
 
-        if department_data:
-            st.sidebar.title("Navigation")
-            page_options = ["Home"] + sorted(list(department_data.keys()))
-            selected_page = st.sidebar.radio("Go to", page_options)
-
-            if selected_page == "Home":
-                show_home_page(department_data)
-            elif selected_page in department_data:
-                show_department_page(selected_page, department_data[selected_page], department_dfs[selected_page])
-        else:
-            st.warning("No valid data could be extracted. Please check the sheet names and content.")
+        if selected_page == "Home":
+            show_home_page(department_data)
+        elif selected_page in department_data:
+            show_department_page(selected_page, department_data[selected_page], department_dfs[selected_page])
+    else:
+        st.warning("No valid data could be extracted from the Google Sheet. Please check the sheet's sharing settings and content.")
 
 if __name__ == "__main__":
     main()
-
